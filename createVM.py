@@ -2,16 +2,19 @@ import argparse
 from ipaddress import ip_address
 import os
 import psutil
-import subprocess
 import getpass
 import time
-
+from shlex import split
 
 def validateOva(v):
     if v.endswith('.ova'):
        return v
     else:
         raise argparse.ArgumentTypeError('ova file expected.')
+
+def printv(v,m):
+    if v:
+       print(m)
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -31,6 +34,18 @@ def readable_dir(prospective_dir):
   else:
     raise Exception("readable_dir:{0} is not a readable dir".format(prospective_dir))
 
+def checkIPS(name,attemps,waitTime):
+  for x in range(attemps):
+    cp = os.popen("VBoxManage guestproperty get '%s' '/VirtualBox/GuestInfo/Net/1/V4/IP' | cut -d' ' -f2" %name).read()
+    #print("++"+cp+"++")
+    if (cp != "value\n"):
+      return cp.rstrip('\n');
+    else:
+      time.sleep(waitTime)
+  raise argparse.ArgumentTypeError('No connection to:  %s'%name)
+
+
+
 # Construct the argument parser
 ap = argparse.ArgumentParser(description='create multiple VMs from an Ova file')
 
@@ -45,20 +60,24 @@ ap.add_argument("-o", "--ovaName", type=validateOva, required=False, default="ce
    help="Name of the directory where the ova and script directory will be located, needs to be in the current directory if -d not specified") ##done
 ap.add_argument("-d", "--directory", type=readable_dir, default=os.path.dirname(os.path.realpath(__file__)), required=False,
    help="Directory to take all scripts and ovas from")
-ap.add_argument("-p", "--pingNumberCheck", type=int, default=3, required=False,
+ap.add_argument("-p", "--pingNumberCheck", type=int, default=5, required=False,
    help="Number of pings to check before failing")
 ap.add_argument("-t", "--timeToCheck", type=int, default=10, required=False,
    help="Time in between ping checks (seconds)")
 ap.add_argument("-w", "--timeWaitReboot", type=int, default=60, required=False,
-   help="Copy scripts into VMs drom scripts directory")
-ap.add_argument("-c", "--copyScripts", type=str2bool, default=False, required=False,
    help="Time to wait during reboot (seconds)")
-ap.add_argument("-m", "--memory", type=int, choices=range(512, 10240), default=1024, required=False,
+ap.add_argument("-c", "--copyScripts", type=str2bool, default=False, required=False,
+   help="Copy scripts into VMs drom scripts directory")
+ap.add_argument("-m", "--memory", type=int, choices=range(512, 10240), default=512, required=False,
    help="Memory to allocate to the machine") ##done
 ap.add_argument("-C", "--cpus", type=int, choices=range(1, 10), default=1, required=False,
    help="Number of CPUs to use") ##done
 ap.add_argument('-k', "--offset", type=int, default=0, required=False,
-   help="Offset initial starting value for hostnamek-(k+N), default is 0") 
+   help="Offset initial starting value for hostnamek-(k+N), default is 0")
+ap.add_argument("--verbose", help="Increase output verbosity",
+                    action="store_true")
+ap.add_argument('-a',"--ansible", help="Add hosts for ansible",
+                    action="store_true")
 
 args = ap.parse_args()
 VMnumber = args.n+args.offset
@@ -117,6 +136,25 @@ if total_expected_mem > free_usable_mem:
 if total_expected_cpu > free_usable_cpu:
   raise Exception("Sorry, not enough cpus for this")
 
+#################################################################
+####    validate there are no other VMs with the same name   ####
+#################################################################
+
+names = []
+
+for x in range(args.n):
+  names.append(args.H + str(x+args.offset))
+
+for x in range(args.n):
+  result = os.system("VBoxManage list vms | grep %s" %names[x])
+  if (result == 0):
+    raise Exception("device name %s is already in use" %names[x])
+
+
+#################################################################
+####    if no issues ask for the root password of the ova    ####
+#################################################################
+
 try: 
   p = getpass.getpass(prompt='ova root password: ') 
 except Exception as error: 
@@ -126,24 +164,24 @@ except Exception as error:
 ####               Create and start VMs                      ####
 #################################################################
 
-names = []
-
-for x in range(args.n):
-  names.append(args.H + str(x+args.offset))
-
 #for x in range(args.n):
 #  print(names[x])
 
 for x in range(args.n):
-  os.system("VBoxManage import %s/%s --vsys 0 --memory %s --cpus %s --vmname %s --eula accept" %(args.directory,args.ovaName,args.memory,args.cpus,names[x]))
+  #print("VBoxManage import %s/%s --vsys 0 --memory %s --cpus %s --vmname %s --eula accept" %(args.directory,args.ovaName,args.memory,args.cpus,names[x]))
+  
+  if args.verbose:
+    os.system("VBoxManage import %s/%s --vsys 0 --memory %s --cpus %s --vmname %s --eula accept" %(args.directory,args.ovaName,args.memory,args.cpus,names[x]))
+  else:
+    os.system("VBoxManage import %s/%s --vsys 0 --memory %s --cpus %s --vmname %s --eula accept &>/dev/null" %(args.directory,args.ovaName,args.memory,args.cpus,names[x]))
   os.system("VBoxManage startvm %s --type=headless" %names[x])
 
 #################################################################
 ####               Wait for VMs to start                     ####
 #################################################################
 
-print("Waiting on VMs to power on")
-time.sleep(args.timeToCheck)
+#print("Waiting on VMs to power on")
+#time.sleep(args.timeToCheck)
 
 #################################################################
 ####          Change hostname directly on VM                 ####
@@ -151,25 +189,45 @@ time.sleep(args.timeToCheck)
 
 ips = []
 
+print("Checking ips")
+
 for x in range(args.n):
-  print(os.system("VBoxManage guestproperty get '%s' '/VirtualBox/GuestInfo/Net/1/V4/IP' | cut -d' ' -f2" %names[x]))
-  #ips.append(os.system("VBoxManage guestproperty get '%s' '/VirtualBox/GuestInfo/Net/1/V4/IP' | cut -d' ' -f2" %names[x]))
-  #os.system("sshpass -p '%s' ssh -o 'StrictHostKeyChecking=no' -o ConnectTimeout=3 root@%s 'hostnamectl set-hostname %s'" %(p,ips[x],names[x]))
+  ips.append(checkIPS(names[x],args.pingNumberCheck,args.timeToCheck))
 
 print("IPs of the devices: ", ips)
 
-#sshpass -p 't@uyM59bQ' ssh username@server.example.com
+print("Changing hostnames")
+
+for x in range(args.n):
+  os.system("sshpass -p '%s' ssh -o 'StrictHostKeyChecking=no' -o ConnectTimeout=3 root@%s 'hostnamectl set-hostname %s'" %(p,ips[x],names[x]))
 
 #################################################################
 ####                Copy scripts to VM                       ####
 #################################################################
 
+if args.copyScripts:
+  for x in range(args.n):
+    os.system("sshpass -p '%s' scp -r %s/scripts root@%s:/root/" %(p,args.directory,ips[x]))
+
+#################################################################
+####        Add devices to hosts ansible files               ####
+#################################################################
+
+if args.ansible:
+  print("Adding ansible hosts")
+  print("[%s]"%args.H)
+  for x in range(args.n):
+    print(ips[x])
+
+
 #################################################################
 ####        Change ip directly on VMs and restart            ####
 #################################################################
 
+
+
 #################################################################
-####               check                      ####
+####                      check                              ####
 #################################################################
 
-os.system("echo Hello from the other %s, bla bla bla %s" %(args.ovaName,free_usable_mem))
+#os.system("echo Hello from the other %s, bla bla bla %s" %(args.ovaName,free_usable_mem))
