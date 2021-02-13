@@ -44,7 +44,19 @@ def checkIPS(name,attemps,waitTime):
       time.sleep(waitTime)
   raise argparse.ArgumentTypeError('No connection to:  %s'%name)
 
-
+def search_string_in_file(string_to_search,read_obj):
+  line_number = -1
+  found = False
+  list_of_results = []
+  for line in read_obj:
+    line_number += 1
+    if string_to_search in line:
+      found = True
+      break
+  list_of_results.append(found)
+  list_of_results.append(line_number)
+  #print(list_of_results)
+  return list_of_results
 
 # Construct the argument parser
 ap = argparse.ArgumentParser(description='create multiple VMs from an Ova file')
@@ -72,18 +84,20 @@ ap.add_argument("-m", "--memory", type=int, choices=range(512, 10240), default=5
    help="Memory to allocate to the machine") ##done
 ap.add_argument("-C", "--cpus", type=int, choices=range(1, 10), default=1, required=False,
    help="Number of CPUs to use") ##done
-ap.add_argument('-k', "--offset", type=int, default=0, required=False,
+ap.add_argument('-O', "--offset", type=int, default=0, required=False,
    help="Offset initial starting value for hostnamek-(k+N), default is 0")
 ap.add_argument("--verbose", help="Increase output verbosity",
                     action="store_true")
 ap.add_argument('-a',"--ansible", help="Add hosts for ansible",
+                    action="store_true")
+ap.add_argument('-k',"--keys", help="Generate ssh keys to devices",
                     action="store_true")
 
 args = ap.parse_args()
 VMnumber = args.n+args.offset
 
 print("Numbers of VM to create: ", args.n)
-print("General number in hostname: from %s to %s" %(args.offset,VMnumber))
+print("General number in hostname: from %s to %s" %(args.offset,VMnumber-1))
 print("Base hostname to use: ", args.H)
 print("Start Ip", args.startIp)
 print("Name of the ova to use: ", args.ovaName)
@@ -196,18 +210,30 @@ for x in range(args.n):
 
 print("IPs of the devices: ", ips)
 
+time.sleep(args.timeToCheck)
+
 print("Changing hostnames")
 
 for x in range(args.n):
-  os.system("sshpass -p '%s' ssh -o 'StrictHostKeyChecking=no' -o ConnectTimeout=3 root@%s 'hostnamectl set-hostname %s'" %(p,ips[x],names[x]))
+  os.system("sshpass -p '%s' ssh -o 'StrictHostKeyChecking=no' root@%s 'hostnamectl set-hostname %s'" %(p,ips[x],names[x]))
 
 #################################################################
 ####                Copy scripts to VM                       ####
 #################################################################
 
 if args.copyScripts:
+  print("Copying scripts to devices")
   for x in range(args.n):
     os.system("sshpass -p '%s' scp -r %s/scripts root@%s:/root/" %(p,args.directory,ips[x]))
+
+#################################################################
+####              Generate Keys to devices                   ####
+#################################################################
+
+if args.keys:
+  print("Copying ssh key")
+  for x in range(args.n):
+    os.system("sshpass -p '%s' ssh-copy-id -i ~/.ssh/id_rsa.pub root@%s &>/dev/null" %(p,ips[x]))
 
 #################################################################
 ####        Add devices to hosts ansible files               ####
@@ -215,9 +241,41 @@ if args.copyScripts:
 
 if args.ansible:
   print("Adding ansible hosts")
-  print("[%s]"%args.H)
+
+  fp = open("/etc/ansible/hosts", "r")
+  lines = fp.readlines()
+  fp.close()
+  nums= search_string_in_file("[%s]\n" %args.H,lines)
+  #print(nums[0])
+  #print(nums[1])
+  #print(lines[nums[1]])
+  #print("[%s]"%args.H)
+  p = 1
+  if not nums[0]:
+    lines.insert(nums[1]+p, "[%s]\n"%args.H)
+    p = 2
+  lines.insert(nums[1]+p, "#%s from %s to %s\n"%(args.H,args.offset,VMnumber-1))
   for x in range(args.n):
-    print(ips[x])
+    lines.insert(nums[1]+p+1+x, "%s\n"%ips[x])
+    #print(ips[x])
+  #print(lines)
+  f = open("/etc/ansible/hosts", "w")
+  lines = "".join(lines)
+  f.write(lines)
+  f.close()
+  #numsdel = nums[1] - nums[0]
+  #print(lines[nums[0]])
+  #for x in range(numsdel):
+  #  del lines[nums[0]]
+  #print(lines)
+
+  #new_file = open("/etc/ansible/hosts", "w+")
+  #for line in lines:
+  #  new_file.write(line)
+  #new_file.close()
+  #print("[%s]"%args.H)
+  #for x in range(args.n):
+  #  print(ips[x])
 
 
 #################################################################
